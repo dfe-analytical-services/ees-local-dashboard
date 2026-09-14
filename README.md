@@ -12,7 +12,7 @@ This was entirely vibe coded to make EES developers lives a little easier when m
 
 ```bash
 cp .env.example .env
-# Update .env to point so EES_PROJECT_ROOT is your EES directory
+# Update .env so EES_PROJECT_ROOT is your EES directory
 pnpm install
 pnpm dashboard
 ```
