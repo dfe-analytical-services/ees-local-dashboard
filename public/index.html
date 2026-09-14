@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>EES Local Dashboard</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="section-header">
+        <h1>EES Local Dashboard</h1>
+        <button id="stop-all-btn" class="danger">Stop everything</button>
+      </div>
+      <p class="subtitle">
+        Services started here are tracked live. Anything started separately via
+        <code>pnpm start</code> in a terminal won't show as running here.
+      </p>
+    </header>
+
+    <div id="project-root-banner" class="project-root-banner hidden"></div>
+    <div id="operation-banner" class="operation-banner hidden"></div>
+    <div id="issues-banner" class="issues-banner hidden"></div>
+    <div id="warnings-banner" class="issues-banner warnings hidden"></div>
+
+    <main>
+      <section>
+        <h2>Docker services</h2>
+        <div id="docker-services" class="card-grid"></div>
+      </section>
+
+      <section>
+        <h2>App processes</h2>
+        <div id="app-services" class="card-grid"></div>
+      </section>
+
+      <section>
+        <h2>Backups</h2>
+        <div id="backup-panel"></div>
+      </section>
+
+      <section>
+        <h2>Import DB test zip</h2>
+        <div id="test-data-panel" class="backup-store">
+          <p class="card-meta">
+            Latest <code>ees-mssql-data-xx.zip</code> snapshots are shared in
+            <a
+              href="https://drive.google.com/drive/u/0/folders/1hqsOGQWPQSmxiRwEfarT2meTw9DsfMv8"
+              target="_blank"
+              rel="noopener noreferrer"
+              >this Google Drive folder</a
+            >.
+          </p>
+          <div class="backup-create-row">
+            <input id="mssql-import-input" type="file" accept=".zip" />
+            <button id="mssql-import-btn" class="primary op-exclusive">
+              Import
+            </button>
+          </div>
+          <p class="card-meta">
+            Stops the db and any running app processes, extracts the zip over
+            <code>data/ees-mssql</code>, then restarts the db.
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <div id="log-panel-backdrop" class="log-panel-backdrop hidden"></div>
+    <div id="log-panel" class="log-panel hidden">
+      <div class="log-panel-header">
+        <span id="log-panel-title" class="log-panel-title"></span>
+        <a id="log-panel-download" class="log-panel-download" download>
+          Download full log
+        </a>
+        <button id="log-panel-close">Close</button>
+      </div>
+      <pre id="log-panel-content" class="log-panel-content"></pre>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

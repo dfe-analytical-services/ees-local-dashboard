@@ -1,0 +1,473 @@
+:root {
+  color-scheme: dark;
+  --bg: #14171c;
+  --panel: #1c2028;
+  --border: #2c313c;
+  --text: #e4e7ec;
+  --muted: #8a91a0;
+  --green: #3fbf6a;
+  --red: #e5534b;
+  --amber: #d9a441;
+  --blue: #4d8ff0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+header {
+  padding: 1.5rem 2rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.4rem;
+}
+
+.subtitle {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.project-root-banner {
+  background: rgba(217, 164, 65, 0.12);
+  border: 1px solid var(--amber);
+  border-radius: 8px;
+  padding: 0.6rem 1rem;
+  margin: 1rem 2rem 0;
+  font-size: 0.8rem;
+  font-family: monospace;
+}
+
+.project-root-banner.hidden {
+  display: none;
+}
+
+.operation-banner {
+  background: rgba(77, 143, 240, 0.12);
+  border: 1px solid var(--blue);
+  border-radius: 8px;
+  padding: 0.6rem 1rem;
+  margin: 1rem 2rem 0;
+  font-size: 0.8rem;
+}
+
+.operation-banner.hidden {
+  display: none;
+}
+
+.issues-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  background: rgba(229, 83, 75, 0.12);
+  border: 1px solid var(--red);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  margin: 1rem 2rem 0;
+  font-size: 0.85rem;
+}
+
+.issues-banner.hidden {
+  display: none;
+}
+
+/* Warnings share the issues banner's layout but trade the red for amber -
+   drifted tool versions shouldn't shout as loudly as a broken service. */
+.issues-banner.warnings {
+  background: rgba(217, 164, 65, 0.12);
+  border-color: var(--amber);
+}
+
+.issues-banner.warnings .issue-service-chip {
+  background: rgba(217, 164, 65, 0.2);
+  border-color: var(--amber);
+}
+
+.issues-banner.warnings .issue-service-chip:hover {
+  background: rgba(217, 164, 65, 0.3);
+}
+
+.issues-banner button {
+  flex-shrink: 0;
+}
+
+.issue-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.issue-text {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.issue-service-chip {
+  flex-shrink: 0;
+  background: rgba(229, 83, 75, 0.2);
+  border: 1px solid var(--red);
+  border-radius: 999px;
+  padding: 0.15rem 0.6rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.issue-service-chip:hover {
+  background: rgba(229, 83, 75, 0.3);
+}
+
+main {
+  padding: 1.5rem 2rem 3rem;
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+}
+
+h2 {
+  font-size: 1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 0 0 0.75rem;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.section-header h2 {
+  margin-bottom: 0;
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.75rem;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.card-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.card-name {
+  font-weight: 600;
+}
+
+.status-dot {
+  display: inline-block;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  margin-right: 0.4rem;
+}
+
+.status-running {
+  background: var(--green);
+}
+
+.status-stopped {
+  background: var(--muted);
+}
+
+.status-starting,
+.status-stopping {
+  background: var(--amber);
+}
+
+.status-error,
+.status-unhealthy {
+  background: var(--red);
+}
+
+.status-label {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.card-meta {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.card-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.admin-option {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.admin-option input {
+  accent-color: var(--blue);
+}
+
+.admin-option input:disabled {
+  cursor: default;
+}
+
+.admin-option.disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button {
+  background: #262b35;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--blue);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.danger:hover {
+  border-color: var(--red);
+}
+
+.primary {
+  background: var(--blue);
+  border-color: var(--blue);
+  color: #0a0f1a;
+  font-weight: 600;
+}
+
+.backup-store {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  max-width: 640px;
+}
+
+.backup-store h3 {
+  margin: 0 0 0.75rem;
+  font-size: 0.95rem;
+}
+
+.backup-create-row {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.backup-create-row input {
+  flex: 1;
+  background: #10131a;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+  color: var(--text);
+  font-size: 0.8rem;
+}
+
+.backup-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.backup-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  background: #10131a;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.8rem;
+}
+
+.backup-item-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.backup-item-label {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backup-item-meta {
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.backup-item-actions {
+  display: flex;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
+.empty-note {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-style: italic;
+}
+
+.mode-selector {
+  display: flex;
+  gap: 0.75rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.mode-selector label {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  cursor: pointer;
+}
+
+.mode-selector input:disabled + span,
+.mode-selector input:disabled {
+  cursor: default;
+}
+
+.open-link {
+  background: #262b35;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.8rem;
+  text-decoration: none;
+  display: inline-block;
+}
+
+.open-link:hover {
+  border-color: var(--blue);
+}
+
+.log-panel-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 10;
+}
+
+.log-panel-backdrop.hidden {
+  display: none;
+}
+
+.log-panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(70vw, calc(100vw - 2rem));
+  height: min(70vh, calc(100vh - 2rem));
+  background: #0b0d12;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+  z-index: 11;
+}
+
+.log-panel.hidden {
+  display: none;
+}
+
+.log-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+/* Takes up the slack, so the download link and Close sit together on the
+   right rather than being spread across the header. */
+.log-panel-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.log-panel-download {
+  color: var(--muted);
+  font-weight: 400;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.log-panel-download:hover {
+  color: var(--blue);
+  text-decoration: underline;
+}
+
+.log-panel-content {
+  margin: 0;
+  padding: 0.75rem;
+  overflow-y: auto;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  flex: 1;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+  }
+}

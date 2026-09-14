@@ -1,0 +1,881 @@
+/* eslint-disable no-alert -- This is a single-user local dev tool served on
+   localhost, and confirm()/alert() are the right weight for "you are about to
+   overwrite your local database". Building a modal system to say the same
+   thing would be more code to go wrong for no benefit. */
+
+const dockerServicesEl = document.getElementById('docker-services');
+const appServicesEl = document.getElementById('app-services');
+const backupPanelEl = document.getElementById('backup-panel');
+const stopAllBtn = document.getElementById('stop-all-btn');
+const issuesBannerEl = document.getElementById('issues-banner');
+const warningsBannerEl = document.getElementById('warnings-banner');
+const projectRootBannerEl = document.getElementById('project-root-banner');
+const operationBannerEl = document.getElementById('operation-banner');
+
+stopAllBtn.addEventListener('click', async () => {
+  if (!window.confirm('Stop all app processes AND all Docker services?')) {
+    return;
+  }
+  stopAllBtn.disabled = true;
+  stopAllBtn.textContent = 'Stopping...';
+  try {
+    const { forced = [] } = await api('/api/services/stop-all', {
+      method: 'POST',
+    });
+
+    // A service that ignored SIGTERM was killed outright, so it never got to
+    // shut down cleanly - worth knowing before trusting whatever it left.
+    if (forced.length) {
+      window.alert(
+        `These didn't shut down cleanly and had to be killed: ${forced
+          .map(displayName)
+          .join(', ')}.`,
+      );
+    }
+  } catch (err) {
+    window.alert(err.message);
+  }
+  stopAllBtn.disabled = false;
+  stopAllBtn.textContent = 'Stop everything';
+  refreshServices();
+});
+
+const mssqlImportInput = document.getElementById('mssql-import-input');
+const mssqlImportBtn = document.getElementById('mssql-import-btn');
+
+mssqlImportBtn.addEventListener('click', async () => {
+  const file = mssqlImportInput.files[0];
+  if (!file) {
+    window.alert('Choose a .zip file first.');
+    return;
+  }
+  if (
+    !window.confirm(
+      `Import '${file.name}'? This stops the db and any running app processes, overwrites matching files in data/ees-mssql, then restarts the db. This cannot be undone.`,
+    )
+  ) {
+    return;
+  }
+
+  mssqlImportBtn.disabled = true;
+  mssqlImportBtn.textContent = 'Importing...';
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch('/api/mssql-data/import', {
+      method: 'POST',
+      body: formData,
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(body.error || 'Import failed');
+    }
+    window.alert('Import complete.');
+    mssqlImportInput.value = '';
+  } catch (err) {
+    window.alert(err.message);
+  }
+  mssqlImportBtn.disabled = false;
+  mssqlImportBtn.textContent = 'Import';
+  refreshServices();
+});
+
+const logPanel = document.getElementById('log-panel');
+const logPanelBackdrop = document.getElementById('log-panel-backdrop');
+const logPanelTitle = document.getElementById('log-panel-title');
+const logPanelDownload = document.getElementById('log-panel-download');
+const logPanelContent = document.getElementById('log-panel-content');
+document
+  .getElementById('log-panel-close')
+  .addEventListener('click', closeLogPanel);
+logPanelBackdrop.addEventListener('click', closeLogPanel);
+
+let currentLogSource = null;
+let currentLogService = null;
+let pendingLogLines = [];
+let logFlushHandle = null;
+
+// A `docker logs -f` follow left open runs indefinitely, so without a cap the
+// panel grows without bound. Tracked as a list of appended text nodes rather
+// than by rewriting the panel's text, so dropping the oldest is a node
+// removal rather than re-serialising everything that's left.
+const MAX_PANEL_LINES = 2000;
+let logChunks = [];
+let logLineCount = 0;
+
+function trimLogPanel() {
+  // Never drops the last chunk: it's the one just appended, and the panel
+  // showing nothing would be worse than it showing more than the cap.
+  while (logLineCount > MAX_PANEL_LINES && logChunks.length > 1) {
+    const oldest = logChunks.shift();
+    logLineCount -= oldest.lines;
+    oldest.node.remove();
+  }
+}
+
+/**
+ * Appends every line buffered since the last flush in one go.
+ *
+ * Opening a Docker service's logs replays up to 500 lines as an immediate
+ * burst of SSE events, so writing each line as it arrives meant re-serialising
+ * the whole panel (`textContent +=` is O(n^2) over the total text) and forcing
+ * a synchronous reflow per line by reading `scrollHeight`. Batching keeps both
+ * costs to once per tick no matter how fast lines arrive.
+ *
+ * Scheduled on a timer rather than `requestAnimationFrame` because rAF doesn't
+ * fire while the tab is hidden - lines would queue up unrendered until you
+ * switched back to it.
+ */
+function flushLogLines() {
+  logFlushHandle = null;
+
+  if (pendingLogLines.length === 0) {
+    return;
+  }
+
+  // Measure before appending, and only stick to the bottom if we were already
+  // there - otherwise a burst yanks the view away while you're reading back.
+  const pinnedToBottom =
+    logPanelContent.scrollHeight - logPanelContent.scrollTop <=
+    logPanelContent.clientHeight + 20;
+
+  const node = document.createTextNode(`${pendingLogLines.join('\n')}\n`);
+  logPanelContent.appendChild(node);
+  logChunks.push({ node, lines: pendingLogLines.length });
+  logLineCount += pendingLogLines.length;
+  pendingLogLines = [];
+
+  trimLogPanel();
+
+  if (pinnedToBottom) {
+    logPanelContent.scrollTop = logPanelContent.scrollHeight;
+  }
+}
+
+function closeLogPanel() {
+  if (currentLogSource) {
+    currentLogSource.close();
+    currentLogSource = null;
+  }
+  if (logFlushHandle !== null) {
+    clearTimeout(logFlushHandle);
+    logFlushHandle = null;
+  }
+  pendingLogLines = [];
+  logChunks = [];
+  logLineCount = 0;
+  currentLogService = null;
+  logPanel.classList.add('hidden');
+  logPanelBackdrop.classList.add('hidden');
+}
+
+function openLogPanel(name) {
+  if (currentLogService === name) {
+    closeLogPanel();
+    return;
+  }
+
+  closeLogPanel();
+  currentLogService = name;
+  logPanelTitle.textContent = `Logs: ${displayName(name)}`;
+  // The panel only holds the tail of the log; this is the whole of it.
+  logPanelDownload.href = `/api/services/${name}/log-file`;
+  logPanelContent.textContent = '';
+  logPanel.classList.remove('hidden');
+  logPanelBackdrop.classList.remove('hidden');
+
+  currentLogSource = new EventSource(`/api/services/${name}/logs`);
+  currentLogSource.onmessage = event => {
+    pendingLogLines.push(JSON.parse(event.data));
+
+    if (logFlushHandle === null) {
+      logFlushHandle = setTimeout(flushLogLines, 16);
+    }
+  };
+}
+
+async function api(path, options) {
+  const res = await fetch(path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...options,
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(body.error || `Request to ${path} failed`);
+  }
+  return body;
+}
+
+function statusLabel(status) {
+  return status.charAt(0).toUpperCase() + status.slice(1);
+}
+
+function displayName(name) {
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+function needsText(service) {
+  const needs = [
+    ...(service.dependsOnServices ?? []),
+    ...(service.dependsOn ?? []),
+  ];
+  return needs.length ? `Needs: ${needs.join(', ')}` : '';
+}
+
+function appendCardMeta(card, text, isError) {
+  if (!text) {
+    return;
+  }
+  const meta = document.createElement('div');
+  meta.className = 'card-meta';
+  if (isError) {
+    meta.style.color = 'var(--red)';
+  }
+  meta.textContent = text;
+  card.appendChild(meta);
+}
+
+function appendOpenLink(card, service) {
+  if (service.status !== 'running' || !service.url) {
+    return;
+  }
+  const link = document.createElement('a');
+  link.className = 'open-link';
+  link.href = service.url;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  link.textContent = 'Open ↗';
+  card.appendChild(link);
+}
+
+function isStarted(service) {
+  return (
+    service?.status === 'running' ||
+    service?.status === 'starting' ||
+    service?.status === 'unhealthy'
+  );
+}
+
+/**
+ * Whether starting admin should also use (and start) the public API. Once
+ * admin is up this is simply what it's actually running with, as reported by
+ * the server. Before that, the user's explicit choice wins, and otherwise
+ * it's derived: admin's own PublicDataDbExists appsetting, or the public API
+ * already being up - starting admin without the override alongside a running
+ * publicData would leave the two unable to talk to each other.
+ */
+function startsWithPublicData(admin) {
+  if (isStarted(admin)) {
+    return Boolean(admin.publicDataDbExists);
+  }
+
+  return (
+    startPublicDataChoice ??
+    (Boolean(admin.publicDataDbExists) ||
+      isStarted(lastServices.find(s => s.name === 'publicData')))
+  );
+}
+
+function renderServiceCard(service) {
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.id = `service-card-${service.name}`;
+
+  const titleRow = document.createElement('div');
+  titleRow.className = 'card-title-row';
+
+  const name = document.createElement('span');
+  name.className = 'card-name';
+  name.textContent = displayName(service.name);
+  titleRow.appendChild(name);
+
+  const status = document.createElement('span');
+  status.className = 'status-label';
+  status.innerHTML = `<span class="status-dot status-${service.status}"></span>${statusLabel(service.status)}`;
+  titleRow.appendChild(status);
+
+  card.appendChild(titleRow);
+
+  if (service.kind === 'process') {
+    appendCardMeta(card, needsText(service));
+  }
+  appendCardMeta(card, service.error, true);
+  appendOpenLink(card, service);
+
+  const actions = document.createElement('div');
+  actions.className = 'card-actions';
+
+  // 'unhealthy' means the process is up but not working - so it's still the
+  // Stop button that's wanted, not another Start that would spawn a second one
+  // alongside it.
+  const isRunning =
+    service.status === 'running' || service.status === 'unhealthy';
+  const isBusy = service.status === 'starting' || service.status === 'stopping';
+
+  if (service.name === 'admin') {
+    const option = document.createElement('label');
+    option.className = 'admin-option';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = startsWithPublicData(service);
+    checkbox.disabled = isRunning || isBusy;
+    option.classList.toggle('disabled', isRunning || isBusy);
+    checkbox.addEventListener('change', () => {
+      startPublicDataChoice = checkbox.checked;
+      renderApp();
+    });
+    option.appendChild(checkbox);
+    option.appendChild(document.createTextNode('Start with PublicData'));
+
+    card.appendChild(option);
+  }
+
+  const toggleBtn = document.createElement('button');
+  toggleBtn.className = isRunning ? 'danger' : 'primary';
+  toggleBtn.textContent = isRunning ? 'Stop' : 'Start';
+  toggleBtn.disabled = isBusy;
+  toggleBtn.addEventListener('click', async () => {
+    // Send admin's checkbox state either way round, so that starting it is
+    // always exactly what the checkbox showed - including deliberately
+    // without the public API when its appsettings would have used it.
+    const startPublicData =
+      service.name === 'admin' && !isRunning
+        ? startsWithPublicData(service)
+        : undefined;
+
+    if (
+      startPublicData === false &&
+      isStarted(lastServices.find(s => s.name === 'publicData')) &&
+      !window.confirm(
+        "'Start with PublicData' is unticked, so Admin will start without " +
+          'using the public API even though PublicData is running. Start it ' +
+          'anyway?',
+      )
+    ) {
+      return;
+    }
+
+    toggleBtn.disabled = true;
+    try {
+      await api(
+        `/api/services/${service.name}/${isRunning ? 'stop' : 'start'}`,
+        {
+          method: 'POST',
+          ...(startPublicData === undefined
+            ? {}
+            : { body: JSON.stringify({ startPublicData }) }),
+        },
+      );
+    } catch (err) {
+      window.alert(err.message);
+    }
+    refreshServices();
+  });
+  actions.appendChild(toggleBtn);
+
+  const logsBtn = document.createElement('button');
+  logsBtn.textContent =
+    currentLogService === service.name ? 'Hide logs' : 'Logs';
+  logsBtn.addEventListener('click', () => {
+    openLogPanel(service.name);
+    refreshServices();
+  });
+  actions.appendChild(logsBtn);
+
+  card.appendChild(actions);
+  return card;
+}
+
+// Persists which mode is selected per group across re-renders, since
+// nothing else remembers it while no member of the group is running.
+const selectedModeByGroup = {};
+
+// Services sharing a `group` (e.g. frontend/frontendProd, which can't run at
+// the same time) are shown as one tile with a mode selector, rather than as
+// separate cards.
+function renderGroupedServiceCard(groupName, members) {
+  const active = members.find(
+    m =>
+      m.status === 'running' ||
+      m.status === 'starting' ||
+      m.status === 'stopping' ||
+      m.status === 'unhealthy',
+  );
+  const locked = Boolean(active);
+  const selectedName =
+    active?.name ?? selectedModeByGroup[groupName] ?? members[0].name;
+  const selected = members.find(m => m.name === selectedName) ?? members[0];
+
+  const card = document.createElement('div');
+  card.className = 'card';
+
+  const titleRow = document.createElement('div');
+  titleRow.className = 'card-title-row';
+
+  const name = document.createElement('span');
+  name.className = 'card-name';
+  name.textContent = displayName(groupName);
+  titleRow.appendChild(name);
+
+  const status = document.createElement('span');
+  status.className = 'status-label';
+  const displayStatus = active?.status ?? 'stopped';
+  status.innerHTML = `<span class="status-dot status-${displayStatus}"></span>${statusLabel(displayStatus)}`;
+  titleRow.appendChild(status);
+
+  card.appendChild(titleRow);
+
+  const modeSelector = document.createElement('div');
+  modeSelector.className = 'mode-selector';
+
+  members.forEach(member => {
+    const label = document.createElement('label');
+    const radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = `mode-${groupName}`;
+    radio.value = member.name;
+    radio.checked = member.name === selectedName;
+    radio.disabled = locked;
+    radio.addEventListener('change', () => {
+      selectedModeByGroup[groupName] = member.name;
+      renderApp();
+    });
+    label.appendChild(radio);
+    label.append(displayName(member.name));
+    modeSelector.appendChild(label);
+  });
+  card.appendChild(modeSelector);
+
+  appendCardMeta(card, needsText(selected));
+  appendCardMeta(card, selected.error, true);
+  appendOpenLink(card, active ?? selected);
+
+  const actions = document.createElement('div');
+  actions.className = 'card-actions';
+
+  const isBusy = displayStatus === 'starting' || displayStatus === 'stopping';
+
+  // Only frontendProd builds on start (`pnpm build && pnpm start`), so this is
+  // the one mode where skipping it means anything - matches the CLI's
+  // --skip-build.
+  const buildsOnStart = selectedName === 'frontendProd';
+
+  if (buildsOnStart) {
+    const option = document.createElement('label');
+    option.className = 'admin-option';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = skipBuildChoice;
+    checkbox.disabled = locked || isBusy;
+    option.classList.toggle('disabled', locked || isBusy);
+    checkbox.addEventListener('change', () => {
+      skipBuildChoice = checkbox.checked;
+      renderApp();
+    });
+    option.appendChild(checkbox);
+    option.appendChild(document.createTextNode('Skip build'));
+
+    card.appendChild(option);
+  }
+
+  const toggleBtn = document.createElement('button');
+  toggleBtn.className = active ? 'danger' : 'primary';
+  toggleBtn.textContent = active ? 'Stop' : 'Start';
+  toggleBtn.disabled = isBusy;
+  toggleBtn.addEventListener('click', async () => {
+    const target = active ? active.name : selectedName;
+    toggleBtn.disabled = true;
+    try {
+      await api(`/api/services/${target}/${active ? 'stop' : 'start'}`, {
+        method: 'POST',
+        ...(!active && buildsOnStart
+          ? { body: JSON.stringify({ skipBuild: skipBuildChoice }) }
+          : {}),
+      });
+    } catch (err) {
+      window.alert(err.message);
+    }
+    refreshServices();
+  });
+  actions.appendChild(toggleBtn);
+
+  const logsBtn = document.createElement('button');
+  const logsTarget = active?.name ?? selectedName;
+  logsBtn.textContent = currentLogService === logsTarget ? 'Hide logs' : 'Logs';
+  logsBtn.addEventListener('click', () => {
+    openLogPanel(logsTarget);
+    refreshServices();
+  });
+  actions.appendChild(logsBtn);
+
+  card.appendChild(actions);
+  return card;
+}
+
+function groupServices(services) {
+  const groups = new Map();
+  const ungrouped = [];
+
+  services.forEach(service => {
+    if (service.kind === 'process' && service.group) {
+      const members = groups.get(service.group) ?? [];
+      members.push(service);
+      groups.set(service.group, members);
+    } else {
+      ungrouped.push(service);
+    }
+  });
+
+  return { groups, ungrouped };
+}
+
+let lastServices = [];
+let fixingIssueId = null;
+// The destructive operation the server says is running, if any. Backup,
+// restore, delete and import refuse to overlap (409), so the buttons reflect
+// that rather than letting a click come back as an error.
+let runningOperation = null;
+// Whether to skip `frontendProd`'s production build, mirroring the CLI's
+// --skip-build. Remembered across re-renders, like the mode selection.
+let skipBuildChoice = false;
+
+function renderOperationState() {
+  const busy = Boolean(runningOperation);
+
+  document.querySelectorAll('.op-exclusive').forEach(element => {
+    element.toggleAttribute('disabled', busy);
+
+    if (busy) {
+      element.setAttribute('title', `Busy: ${runningOperation}`);
+    } else {
+      element.removeAttribute('title');
+    }
+  });
+
+  operationBannerEl.textContent = busy
+    ? `${runningOperation[0].toUpperCase()}${runningOperation.slice(1)} in progress - other data operations are unavailable until it finishes.`
+    : '';
+  operationBannerEl.classList.toggle('hidden', !busy);
+}
+// The user's explicit "Start with PublicData" choice on the Admin card, or
+// null when they haven't touched it and it should follow the state of things
+// (see startsWithPublicData below).
+let startPublicDataChoice = null;
+
+// Issues are rendered in the banner at the top. Each one may name the service
+// it's associated with (e.g. the db container), shown as a chip that scrolls
+// to that service's card.
+async function runIssueFix(issue) {
+  if (issue.action === 'open-import') {
+    mssqlImportInput.scrollIntoView({
+      behavior: 'smooth',
+      block: 'center',
+    });
+    mssqlImportInput.click();
+    return;
+  }
+
+  fixingIssueId = issue.id;
+  refreshServices();
+  try {
+    await api(issue.fixEndpoint, { method: 'POST' });
+  } catch (err) {
+    window.alert(err.message);
+  }
+  fixingIssueId = null;
+  refreshServices();
+}
+
+function makeIssueFixButton(issue) {
+  const fixBtn = document.createElement('button');
+  const isFixing = fixingIssueId === issue.id;
+  fixBtn.disabled = isFixing;
+  fixBtn.textContent = isFixing ? 'Fixing...' : issue.fixLabel;
+  fixBtn.addEventListener('click', () => runIssueFix(issue));
+  return fixBtn;
+}
+
+function renderProjectRootBanner(projectRootOverride) {
+  if (!projectRootOverride) {
+    projectRootBannerEl.classList.add('hidden');
+    return;
+  }
+
+  projectRootBannerEl.textContent = `Managing services from ${projectRootOverride} (EES_PROJECT_ROOT override)`;
+  projectRootBannerEl.classList.remove('hidden');
+}
+
+// Errors and warnings get separate banners (red and amber) so that a tool
+// that's merely drifted behind the repo's pins doesn't look as urgent as a
+// database that won't start.
+function renderIssues(issues) {
+  renderIssueBanner(
+    issuesBannerEl,
+    issues.filter(issue => issue.severity !== 'warning'),
+  );
+  renderIssueBanner(
+    warningsBannerEl,
+    issues.filter(issue => issue.severity === 'warning'),
+  );
+}
+
+function renderIssueBanner(bannerEl, issues) {
+  bannerEl.replaceChildren();
+
+  if (issues.length === 0) {
+    bannerEl.classList.add('hidden');
+    return;
+  }
+
+  bannerEl.classList.remove('hidden');
+
+  issues.forEach(issue => {
+    const row = document.createElement('div');
+    row.className = 'issue-row';
+
+    const text = document.createElement('span');
+    text.className = 'issue-text';
+
+    if (issue.serviceName) {
+      const chip = document.createElement('button');
+      chip.className = 'issue-service-chip';
+      chip.title = `Scroll to the ${displayName(issue.serviceName)} service`;
+      chip.textContent = displayName(issue.serviceName);
+      chip.addEventListener('click', () => {
+        document
+          .getElementById(`service-card-${issue.serviceName}`)
+          ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+      text.appendChild(chip);
+    }
+
+    const message = document.createElement('span');
+    message.textContent = issue.message;
+    text.appendChild(message);
+
+    row.appendChild(text);
+
+    if (issue.fixLabel) {
+      row.appendChild(makeIssueFixButton(issue));
+    }
+
+    bannerEl.appendChild(row);
+  });
+}
+
+function renderApp() {
+  const { groups, ungrouped } = groupServices(lastServices);
+
+  const dockerCards = ungrouped
+    .filter(s => s.kind === 'docker')
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map(renderServiceCard);
+  dockerServicesEl.replaceChildren(...dockerCards);
+
+  const processItems = ungrouped
+    .filter(s => s.kind === 'process')
+    .map(service => ({
+      sortKey: service.name,
+      card: renderServiceCard(service),
+    }));
+
+  groups.forEach((members, groupName) => {
+    processItems.push({
+      sortKey: groupName,
+      card: renderGroupedServiceCard(groupName, members),
+    });
+  });
+
+  processItems.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+  appServicesEl.replaceChildren(...processItems.map(item => item.card));
+}
+
+// Never rejects: this runs on a timer, so a transient failure (the server
+// restarting, most often) would otherwise produce an unhandled rejection
+// every few seconds, and the next tick recovers on its own anyway.
+async function refreshServices() {
+  try {
+    const {
+      services,
+      issues = [],
+      projectRootOverride,
+      runningOperation: operation = null,
+    } = await api('/api/services');
+    lastServices = services;
+    runningOperation = operation;
+    renderApp();
+    renderIssues(issues);
+    renderProjectRootBanner(projectRootOverride);
+    renderOperationState();
+  } catch (err) {
+    console.error('Failed to refresh services', err);
+  }
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB'];
+  let value = bytes;
+  let unit = -1;
+  do {
+    value /= 1024;
+    unit += 1;
+  } while (value >= 1024 && unit < units.length - 1);
+  return `${value.toFixed(1)} ${units[unit]}`;
+}
+
+function formatTimestamp(iso) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return date.toLocaleString();
+}
+
+const STORE_LABELS = {
+  mssql: 'MSSQL',
+  postgres: 'Postgres',
+  azurite: 'Azurite',
+};
+
+function storesSummary(stores) {
+  return Object.entries(STORE_LABELS)
+    .filter(([store]) => stores[store])
+    .map(([store, label]) => `${label} ${formatBytes(stores[store].sizeBytes)}`)
+    .join(' · ');
+}
+
+function renderBackupItem(backup) {
+  const item = document.createElement('div');
+  item.className = 'backup-item';
+
+  const info = document.createElement('div');
+  info.className = 'backup-item-info';
+
+  const label = document.createElement('span');
+  label.className = 'backup-item-label';
+  label.textContent = backup.label;
+  info.appendChild(label);
+
+  const meta = document.createElement('span');
+  meta.className = 'backup-item-meta';
+  meta.textContent = `${formatTimestamp(backup.timestamp)} · ${storesSummary(backup.stores)}`;
+  info.appendChild(meta);
+
+  item.appendChild(info);
+
+  const actions = document.createElement('div');
+  actions.className = 'backup-item-actions';
+
+  const restoreBtn = document.createElement('button');
+  restoreBtn.className = 'op-exclusive';
+  restoreBtn.textContent = 'Restore';
+  restoreBtn.addEventListener('click', async () => {
+    if (
+      !window.confirm(
+        `Restore '${backup.label}'? This overwrites the current MSSQL, Postgres, and Azurite local dev data, and cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    restoreBtn.disabled = true;
+    try {
+      await api(`/api/backups/${backup.id}/restore`, { method: 'POST' });
+      window.alert('Restore complete.');
+    } catch (err) {
+      window.alert(err.message);
+    }
+    restoreBtn.disabled = false;
+  });
+  actions.appendChild(restoreBtn);
+
+  const deleteBtn = document.createElement('button');
+  deleteBtn.className = 'danger op-exclusive';
+  deleteBtn.textContent = 'Delete';
+  deleteBtn.addEventListener('click', async () => {
+    if (
+      !window.confirm(`Delete backup '${backup.label}'? This cannot be undone.`)
+    ) {
+      return;
+    }
+    try {
+      await api(`/api/backups/${backup.id}`, { method: 'DELETE' });
+      refreshBackups();
+    } catch (err) {
+      window.alert(err.message);
+    }
+  });
+  actions.appendChild(deleteBtn);
+
+  item.appendChild(actions);
+  return item;
+}
+
+function renderBackupPanel(backups) {
+  const panel = document.createElement('div');
+  panel.className = 'backup-store';
+
+  const createRow = document.createElement('div');
+  createRow.className = 'backup-create-row';
+
+  const labelInput = document.createElement('input');
+  labelInput.type = 'text';
+  labelInput.placeholder = 'Label (optional)';
+  createRow.appendChild(labelInput);
+
+  const createBtn = document.createElement('button');
+  createBtn.className = 'primary op-exclusive';
+  createBtn.textContent = 'Backup';
+  createBtn.addEventListener('click', async () => {
+    createBtn.disabled = true;
+    createBtn.textContent = 'Backing up...';
+    try {
+      await api('/api/backups', {
+        method: 'POST',
+        body: JSON.stringify({ label: labelInput.value }),
+      });
+      labelInput.value = '';
+      refreshBackups();
+    } catch (err) {
+      window.alert(err.message);
+    }
+    createBtn.disabled = false;
+    createBtn.textContent = 'Backup';
+  });
+  createRow.appendChild(createBtn);
+
+  panel.appendChild(createRow);
+
+  const list = document.createElement('div');
+  list.className = 'backup-list';
+
+  if (backups.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-note';
+    empty.textContent = 'No backups yet.';
+    list.appendChild(empty);
+  } else {
+    backups.forEach(backup => list.appendChild(renderBackupItem(backup)));
+  }
+
+  panel.appendChild(list);
+  return panel;
+}
+
+// Same reasoning as refreshServices: called from click handlers and on load,
+// and a failure here shouldn't surface as an unhandled rejection.
+async function refreshBackups() {
+  try {
+    const { backups } = await api('/api/backups');
+    backupPanelEl.replaceChildren(renderBackupPanel(backups));
+    // The panel was just rebuilt, so its buttons need the current state
+    // reapplying to them.
+    renderOperationState();
+  } catch (err) {
+    console.error('Failed to refresh backups', err);
+  }
+}
+
+refreshServices();
+refreshBackups();
+setInterval(refreshServices, 3000);
