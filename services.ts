@@ -1,10 +1,16 @@
 import chalk, { ChalkInstance } from 'chalk';
+import dotenv from 'dotenv';
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { getDirname } from './utils/nodeGlobals';
 
 const __dirname = getDirname(import.meta.url);
+
+// Loaded here rather than in each entry point because EES_PROJECT_ROOT is
+// read at module load below. dotenv never overrides variables already set,
+// so anything passed on the command line still wins over `.env`.
+dotenv.config({ path: path.join(__dirname, '.env'), quiet: true });
 
 // EES_PROJECT_ROOT points the dashboard at the explore-education-statistics
 // checkout whose services it manages. Exposed separately from `projectRoot`

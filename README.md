@@ -15,7 +15,14 @@ This runs at `http://localhost:4300` by default (override with the `DASHBOARD_PO
 
 The dashboard manages the services of an explore-education-statistics checkout. By default it looks for a
 checkout named `explore-education-statistics` alongside this repository; point it anywhere else by setting
-`EES_PROJECT_ROOT`:
+`EES_PROJECT_ROOT` in a `.env` file (see [`.env.example`](.env.example)):
+
+```bash
+cp .env.example .env
+```
+
+Anything set in the real environment takes precedence over `.env`, so a one-off run against another checkout
+is still just:
 
 ```bash
 EES_PROJECT_ROOT=/path/to/checkout pnpm dashboard
