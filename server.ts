@@ -1,4 +1,5 @@
 import express from 'express';
+import http from 'node:http';
 import multer from 'multer';
 import os from 'node:os';
 import path from 'node:path';
@@ -743,6 +744,39 @@ app.use(
       .json({ error: errorMessage(err) });
   },
 );
+
+/**
+ * Whether another dashboard is already answering on the port. On Windows a
+ * second instance's listen doesn't fail - libuv binds with SO_REUSEADDR, which
+ * Windows takes as permission to double-bind - so two dashboards end up
+ * silently splitting the incoming connections, each with its own registry of
+ * what's running, and the UI flips between their two views of the world.
+ * Probing with a real request catches that up front; a dead listener that
+ * merely holds the port still fails the listen itself below, as it should.
+ */
+function isPortAnswering(port: number): Promise<boolean> {
+  return new Promise(resolve => {
+    const request = http.get(
+      `http://localhost:${port}/api/services`,
+      { timeout: 2_000 },
+      response => {
+        response.resume();
+        resolve(true);
+      },
+    );
+
+    request.on('timeout', () => request.destroy());
+    request.on('error', () => resolve(false));
+  });
+}
+
+if (await isPortAnswering(PORT)) {
+  console.error(
+    `Another dashboard is already running at http://localhost:${PORT} - ` +
+      `stop that one first (or set DASHBOARD_PORT to run this one elsewhere).`,
+  );
+  process.exit(1);
+}
 
 const server = app.listen(PORT, '127.0.0.1', () => {
   console.info(`Dashboard running at http://localhost:${PORT}`);
