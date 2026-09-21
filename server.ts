@@ -54,6 +54,7 @@ import {
   stopProcess,
   subscribeLogs,
 } from './processManager';
+import checkHostsEntries from './hostsEntries';
 import importMssqlDataZip from './testData';
 import checkToolVersions, { ToolIssue } from './toolVersions';
 import findWebAppFailure, { webAppServices } from './webAppHealth';
@@ -241,14 +242,39 @@ async function refreshToolIssues(): Promise<void> {
 refreshToolIssues();
 setInterval(refreshToolIssues, 5 * 60 * 1000).unref();
 
+/**
+ * Whether `db`/`data-storage` resolve to loopback, on its own (shorter) timer
+ * than the tool checks: two getaddrinfo calls are cheap, and someone fixing
+ * their hosts file mid-session should see the banner clear promptly rather
+ * than minutes later.
+ */
+let hostsEntriesIssue: ToolIssue | undefined;
+
+async function refreshHostsEntriesIssue(): Promise<void> {
+  try {
+    hostsEntriesIssue = await checkHostsEntries();
+  } catch (err) {
+    console.error('Failed to check hosts entries:', err);
+  }
+}
+
+refreshHostsEntriesIssue();
+setInterval(refreshHostsEntriesIssue, 30 * 1000).unref();
+
 app.get(
   '/api/services',
   asyncHandler(async (_req, res) => {
     const dockerStatuses = await getDockerStatuses();
 
     // Tooling first: a wrong SDK or Core Tools explains most of what any
-    // other issue would go on to say.
+    // other issue would go on to say. Hosts entries next, for the same
+    // reason: without them every service's own failure (a named-pipes
+    // SqlException, a Functions host storage timeout) is a red herring.
     const issues: ServiceIssue[] = [...toolIssues];
+
+    if (hostsEntriesIssue) {
+      issues.push(hostsEntriesIssue);
+    }
 
     // The mssql data directory issues are associated with the `db` service,
     // so the dashboard labels the banner with it and can scroll to its card.
