@@ -12,12 +12,25 @@ const __dirname = getDirname(import.meta.url);
 // so anything passed on the command line still wins over `.env`.
 dotenv.config({ path: path.join(__dirname, '.env'), quiet: true });
 
+// On Windows, translate Git Bash/MSYS-style paths (`/c/Users/...`) to their
+// Windows form (`C:/Users/...`). Node would otherwise resolve the leading `/`
+// against the current drive, producing paths like `C:\c\Users\...`.
+function normalizePath(p: string): string {
+  if (process.platform === 'win32') {
+    const msysMatch = /^\/([a-zA-Z])(\/|$)/.exec(p);
+    if (msysMatch) {
+      return `${msysMatch[1].toUpperCase()}:/${p.slice(msysMatch[0].length)}`;
+    }
+  }
+  return p;
+}
+
 // EES_PROJECT_ROOT points the dashboard at the explore-education-statistics
 // checkout whose services it manages. Exposed separately from `projectRoot`
 // so callers (e.g. the dashboard UI) can tell whether it's actually set,
 // rather than just resolving to the default.
 export const projectRootOverride = process.env.EES_PROJECT_ROOT
-  ? path.resolve(process.env.EES_PROJECT_ROOT)
+  ? path.resolve(normalizePath(process.env.EES_PROJECT_ROOT))
   : undefined;
 
 // Falls back to a sibling `explore-education-statistics` checkout next to
