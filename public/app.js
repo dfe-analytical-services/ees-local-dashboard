@@ -299,6 +299,22 @@ function renderServiceCard(service) {
   if (service.kind === 'process') {
     appendCardMeta(card, needsText(service));
   }
+  // A first start has to fetch the service's image before anything can run,
+  // which takes long enough that a bare 'Building'/'Pulling' label reads like
+  // a hang - so say what's happening and that no further clicks are needed.
+  if (service.status === 'building') {
+    appendCardMeta(
+      card,
+      'Building its Docker image - a first build can take several minutes. ' +
+        'It will start automatically once the build finishes.',
+    );
+  } else if (service.status === 'pulling') {
+    appendCardMeta(
+      card,
+      'Downloading its Docker image - it will start automatically once the ' +
+        'download finishes.',
+    );
+  }
   appendCardMeta(card, service.error, true);
   appendOpenLink(card, service);
 
@@ -310,7 +326,11 @@ function renderServiceCard(service) {
   // alongside it.
   const isRunning =
     service.status === 'running' || service.status === 'unhealthy';
-  const isBusy = service.status === 'starting' || service.status === 'stopping';
+  const isBusy =
+    service.status === 'starting' ||
+    service.status === 'stopping' ||
+    service.status === 'building' ||
+    service.status === 'pulling';
 
   if (service.name === 'admin') {
     const option = document.createElement('label');

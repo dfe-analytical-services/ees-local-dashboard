@@ -27,6 +27,8 @@ import {
 } from './backups';
 import {
   dockerServiceLogs,
+  findServicesNeedingImage,
+  getDockerImagePreparation,
   getDockerStartFailure,
   getDockerStatuses,
   startDockerServices,
@@ -331,7 +333,10 @@ app.get(
       const schema = serviceSchemas[name];
 
       if (schema.type === 'docker') {
-        const status = dockerStatuses[schema.service] ?? 'stopped';
+        const status =
+          getDockerImagePreparation(schema.service) ??
+          dockerStatuses[schema.service] ??
+          'stopped';
 
         return {
           name,
@@ -399,6 +404,33 @@ app.post(
     const schema = serviceSchemas[name];
 
     if (schema.type === 'docker') {
+      // A start already mid-build/pull (a second click, most likely) will
+      // bring the service up itself when the fetch finishes - starting again
+      // here would just race a second `compose build`/`pull` against it.
+      if (getDockerImagePreparation(schema.service)) {
+        res.json({ ok: true, preparingImage: true });
+        return;
+      }
+
+      const needingImage = await findServicesNeedingImage([schema.service]);
+
+      if (needingImage.size > 0) {
+        // A first build or pull takes minutes, so holding this request open
+        // for it just leaves the browser hanging with nothing on screen about
+        // why. Answer now and let the fetch run behind the status polling,
+        // which shows the card as 'Building'/'Pulling' and then starts the
+        // service; a failure lands on the card via getDockerStartFailure.
+        startDockerServices([schema.service], needingImage).catch(err => {
+          console.error(
+            `Failed to fetch the image for and start '${schema.service}':`,
+            errorMessage(err),
+          );
+        });
+
+        res.json({ ok: true, preparingImage: true });
+        return;
+      }
+
       await startDockerServices([schema.service]);
       res.json({ ok: true });
       return;

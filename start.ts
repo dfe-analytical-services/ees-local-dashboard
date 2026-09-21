@@ -28,14 +28,12 @@ import {
   StartOptions,
 } from './services';
 
-// The directory checkouts are cloned into (ees-screener-api is cloned
-// alongside the managed explore-education-statistics checkout).
-const accountRoot = path.resolve(projectRoot, '..');
-
-const screenerRepositoryName = 'ees-screener-api';
-const screenerLocalDir = `${accountRoot}/${screenerRepositoryName}`;
-const screenerRepoUrl =
-  'https://github.com/dfe-analytical-services/ees-screener-api';
+import {
+  getCranSnapshotDate,
+  screenerLocalDir,
+  screenerRepositoryName,
+  screenerRepoUrl,
+} from './screener';
 
 const program = new Command()
   .description(
@@ -222,13 +220,7 @@ async function startDockerServices() {
         screenerRepoUrl,
       );
 
-      // Pull the CRAN packages from a repository snapshot 3 weeks old to better ensure
-      // that we're grabbing dependencies that have pre-compiled binaries during local
-      // development.
-      //
-      // The Screener API build pipeline will continue to pull from the very latest CRAN
-      // repositories as build speed in the build pipeline is not as crucial as it is locally.
-      const cranSnapshotDate = getMondayDateStringForPriorWeek(3);
+      const cranSnapshotDate = getCranSnapshotDate();
       await $$`docker build --build-arg CRAN_REPOSITORY_SNAPSHOT_VERSION=${cranSnapshotDate} -t explore-education-statistics-data-screener ${screenerLocalDir}`;
     }
 
@@ -385,16 +377,4 @@ function cloneRequiredRepository(
       console.error(`Failed to pull repository '${repositoryName}'`);
     }
   }
-}
-
-function getMondayDateStringForPriorWeek(numberOfWeeksPrior: number): string {
-  const today = new Date();
-  const dayOfWeek = today.getDay();
-  const isoDayOfWeek = dayOfWeek === 0 ? 7 : dayOfWeek;
-
-  const daysToSubtract = isoDayOfWeek + numberOfWeeksPrior * 7 - 1;
-
-  const previousMonday = new Date(today);
-  previousMonday.setDate(today.getDate() - daysToSubtract);
-  return previousMonday.toISOString().split('T')[0];
 }

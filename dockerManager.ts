@@ -8,6 +8,7 @@ import {
   ServiceName,
 } from './services';
 import $$ from './projectExec';
+import { ensureScreenerCheckout, getCranSnapshotDate } from './screener';
 
 export type DockerStatus = 'running' | 'stopped' | 'unknown';
 
@@ -21,7 +22,14 @@ interface ComposePsEntry {
 
 interface ComposeConfig {
   name: string;
-  services?: Record<string, { environment?: Record<string, string> }>;
+  services?: Record<
+    string,
+    {
+      environment?: Record<string, string>;
+      image?: string;
+      build?: { context?: string };
+    }
+  >;
   volumes?: Record<string, { name?: string }>;
 }
 
@@ -342,14 +350,164 @@ async function findFailedStarts(
   }
 }
 
+/**
+ * How a Docker service's missing image gets onto the machine: built from a
+ * `build:` context, or pulled from a registry.
+ */
+export type DockerImagePreparation = 'building' | 'pulling';
+
+/**
+ * Docker services whose images are currently being built or pulled, so the
+ * dashboard can show 'Building'/'Pulling' rather than a card that just says
+ * 'Stopped' for the several minutes a first `data-screener` build (or a first
+ * mssql pull) takes.
+ */
+const preparingImages = new Map<DockerService, DockerImagePreparation>();
+
+export function getDockerImagePreparation(
+  service: DockerService,
+): DockerImagePreparation | undefined {
+  return preparingImages.get(service);
+}
+
+/**
+ * Which of these services can't start until their image has been fetched:
+ * those whose image doesn't exist locally yet, mapped to whether getting it
+ * means a build or a pull. `compose up` would build/pull them itself, but
+ * inline - holding whatever asked for the start hostage for however many
+ * minutes that takes, with nothing anywhere saying why.
+ */
+export async function findServicesNeedingImage(
+  services: DockerService[],
+): Promise<Map<DockerService, DockerImagePreparation>> {
+  const config = await getComposeConfig();
+
+  const checks = await Promise.all(
+    services.map(
+      async (
+        service,
+      ): Promise<[DockerService, DockerImagePreparation] | undefined> => {
+        const schema = config.services?.[service];
+
+        if (!schema) {
+          return undefined;
+        }
+
+        // Compose names a built image `<project>-<service>` unless the
+        // service sets `image:` explicitly.
+        const image = schema.image ?? `${config.name}-${service}`;
+
+        const { exitCode } = await $$({
+          reject: false,
+        })`docker image inspect ${image}`;
+
+        if (exitCode === 0) {
+          return undefined;
+        }
+
+        return [service, schema.build ? 'building' : 'pulling'];
+      },
+    ),
+  );
+
+  return new Map(checks.filter(check => check !== undefined));
+}
+
+/**
+ * Builds the images for services that have never been built, with whatever
+ * each one needs to exist first. The screener builds from a sibling
+ * `ees-screener-api` checkout (cloned here if it's missing) and pins its R
+ * packages to a CRAN snapshot with pre-compiled binaries, mirroring what the
+ * CLI's start script does - without the pin, a first build compiles them all
+ * from source.
+ */
+async function buildDockerImages(services: DockerService[]): Promise<void> {
+  const buildArgs: string[] = [];
+
+  if (services.includes('data-screener')) {
+    await ensureScreenerCheckout();
+
+    buildArgs.push(
+      '--build-arg',
+      `CRAN_REPOSITORY_SNAPSHOT_VERSION=${getCranSnapshotDate()}`,
+    );
+  }
+
+  await $$`docker compose build ${buildArgs} ${services}`;
+}
+
+/**
+ * Fetches the missing images ahead of `up`, marking each service as
+ * building/pulling for as long as its fetch is running and recording a
+ * one-line failure on the card if it fails - the only surface a background
+ * start has to report to.
+ */
+async function prepareDockerImages(
+  needingImage: Map<DockerService, DockerImagePreparation>,
+): Promise<void> {
+  const byPreparation = (kind: DockerImagePreparation) =>
+    [...needingImage]
+      .filter(([, preparation]) => preparation === kind)
+      .map(([service]) => service);
+
+  needingImage.forEach((preparation, service) =>
+    preparingImages.set(service, preparation),
+  );
+
+  try {
+    const toPull = byPreparation('pulling');
+    const toBuild = byPreparation('building');
+
+    if (toPull.length > 0) {
+      await $$`docker compose pull ${toPull}`;
+    }
+
+    if (toBuild.length > 0) {
+      await buildDockerImages(toBuild);
+    }
+  } catch (err) {
+    // The last stderr line of a failed build, pull or clone is the one naming
+    // the reason.
+    const { stderr, stdout } = err as { stderr?: string; stdout?: string };
+    const reason =
+      readableLogLines(stderr ?? '').at(-1) ??
+      readableLogLines(stdout ?? '').at(-1);
+
+    needingImage.forEach((preparation, service) =>
+      startFailures.set(
+        service,
+        `Failed to ${preparation === 'building' ? 'build' : 'pull'} its Docker image${reason ? `: ${reason}` : ''}`,
+      ),
+    );
+
+    throw err;
+  } finally {
+    needingImage.forEach((_, service) => preparingImages.delete(service));
+  }
+}
+
 export async function startDockerServices(
   services: DockerService[],
+  /**
+   * Services already known to need their image fetched, if the caller has
+   * checked - passing it means they're marked as building/pulling before this
+   * function's first await, so a status poll can't catch the gap and show
+   * 'Stopped' after the caller has already answered that a fetch is underway.
+   */
+  knownNeedingImage?: Map<DockerService, DockerImagePreparation>,
 ): Promise<void> {
   if (services.length === 0) {
     return;
   }
 
   services.forEach(service => startFailures.delete(service));
+
+  const needingImage =
+    knownNeedingImage ?? (await findServicesNeedingImage(services));
+
+  if (needingImage.size > 0) {
+    await prepareDockerImages(needingImage);
+  }
 
   // A service that was already up wasn't started by this call, so it has no
   // grace period to serve - only what `up` actually brought up can fall over

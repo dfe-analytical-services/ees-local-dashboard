@@ -204,7 +204,9 @@ h2 {
 }
 
 .status-starting,
-.status-stopping {
+.status-stopping,
+.status-building,
+.status-pulling {
   background: var(--amber);
 }
 
