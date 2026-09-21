@@ -25,6 +25,16 @@ const MSSQL_UID = 10001;
 const MSSQL_GID = 0;
 
 /**
+ * Whether the host filesystem has real POSIX ownership/permissions to check
+ * or repair. On Windows, Node fakes stat() results (uid/gid 0, mode 666,
+ * never any execute bits), so the check would always fail spuriously - and
+ * Docker Desktop mediates bind-mount permissions itself, so the container
+ * user can write regardless of what the host stat claims and chmod/chown
+ * inside a container can't change the host directory anyway.
+ */
+const HOST_HAS_POSIX_PERMISSIONS = process.platform !== 'win32';
+
+/**
  * Base image for the `db` compose service (see docker/mssql-server/Dockerfile).
  * Used as a throwaway root shell to repair the host directory when the host
  * user isn't its owner (and so can't chmod/chown it directly) - the Docker
@@ -164,7 +174,7 @@ export async function getMssqlVolumeHealth(): Promise<MssqlVolumeHealth> {
   }
 
   if (stat) {
-    if (!canWriteIn(stat.uid, stat.gid, stat.mode)) {
+    if (HOST_HAS_POSIX_PERMISSIONS && !canWriteIn(stat.uid, stat.gid, stat.mode)) {
       problems.push(
         `${MSSQL_DATA_DIR} (uid ${stat.uid}:${stat.gid}, mode ${modeString(stat.mode)}) isn't writable by the mssql container user (uid ${MSSQL_UID})`,
       );
@@ -213,6 +223,13 @@ export async function ensureMssqlVolumePermissions(): Promise<void> {
     throw new Error(
       `${MSSQL_DATA_DIR} doesn't exist - import a db test data zip to create and populate it (${errorMessage(err)})`,
     );
+  }
+
+  if (!HOST_HAS_POSIX_PERMISSIONS) {
+    // Nothing to repair on Windows, and the container-based chmod/chown below
+    // couldn't change the host directory through the bind mount anyway.
+    cachedHealth = undefined;
+    return;
   }
 
   const hostUid = process.getuid?.() ?? -1;
