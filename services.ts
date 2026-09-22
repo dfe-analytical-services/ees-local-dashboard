@@ -480,7 +480,11 @@ export const serviceSchemas: Record<ServiceName, ServiceSchema> = {
     service: 'idp',
     colour: chalk.gray,
     type: 'docker',
-    url: 'http://localhost:5030',
+    // The ees-realm's account console: signs in against the ees-realm itself, so
+    // the seed users (bau1/password etc) work here. To manage users instead, use
+    // the Keycloak admin console (/auth/admin/) with admin/admin - its login page
+    // always authenticates against the master realm, never the ees-realm.
+    url: 'http://localhost:5030/auth/realms/ees-realm/account/',
   },
   db: {
     service: 'db',
