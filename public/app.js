@@ -623,7 +623,7 @@ function renderProjectRootBanner(projectRootOverride) {
     return;
   }
 
-  projectRootBannerEl.textContent = `Managing services from ${projectRootOverride} (EES_PROJECT_ROOT override)`;
+  projectRootBannerEl.textContent = `Managing services from ${projectRootOverride}`;
   projectRootBannerEl.classList.remove('hidden');
 }
 
