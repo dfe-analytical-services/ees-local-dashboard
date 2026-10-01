@@ -59,6 +59,7 @@ import checkHostsEntries from './hostsEntries';
 import importMssqlDataZip from './testData';
 import checkToolVersions, { ToolIssue } from './toolVersions';
 import findWebAppFailure, { webAppServices } from './webAppHealth';
+import createWebAppProber, { PROBE_INTERVAL_MS } from './webAppProbe';
 import findFunctionHostFailure, {
   functionHostServices,
 } from './functionHostHealth';
@@ -262,6 +263,20 @@ async function refreshHostsEntriesIssue(): Promise<void> {
 refreshHostsEntriesIssue();
 setInterval(refreshHostsEntriesIssue, 30 * 1000).unref();
 
+/**
+ * Probes each running web app's homepage in the background, for the failures
+ * the log scan below has no pattern for - a dev server that crashed on
+ * startup leaves its service 'running' and every page request hanging, and
+ * the first pattern-less way of doing that is always still ahead.
+ */
+const webAppProber = createWebAppProber({ getStatus, getLogs });
+
+setInterval(() => {
+  webAppProber.checkNow().catch(err => {
+    console.error('Failed to probe web apps:', err);
+  });
+}, PROBE_INTERVAL_MS).unref();
+
 app.get(
   '/api/services',
   asyncHandler(async (_req, res) => {
@@ -317,8 +332,12 @@ app.get(
     // admin only starts its dev server when the first request arrives, and the
     // frontend's dev server compiles fine and then 500s - so without this the
     // dashboard has nothing to say about a browser showing an exception page.
+    // The log scan goes first because it can name the cause; the probe is the
+    // backstop for a hang whose log matches no pattern anyone's written yet.
     webAppServices.forEach(service => {
-      const failure = findWebAppFailure(service, getLogs(service));
+      const failure =
+        findWebAppFailure(service, getLogs(service)) ??
+        webAppProber.findUnresponsiveWebApp(service);
 
       if (failure) {
         issues.push({
