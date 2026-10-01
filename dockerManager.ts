@@ -486,6 +486,23 @@ async function prepareDockerImages(
   }
 }
 
+/**
+ * The `compose stop` calls still in progress, by the services they're
+ * stopping.
+ *
+ * `compose up -d` leaves a container it finds running alone, and a container
+ * that `compose stop` has sent SIGTERM to is still running until it exits -
+ * which SQL Server and Azurite only do when the ten-second timeout kills
+ * them. So a start issued while a stop-all is still draining (stop
+ * everything, then start admin, say) skips exactly the services that take
+ * longest to stop, and reports them up a few seconds before they die. The
+ * Functions hosts that depend on them then build, launch, and fault on a
+ * storage account nobody is listening at, which looks for all the world like
+ * a broken Core Tools. Waiting for the stop to finish first means `up` sees
+ * the exited container and starts it.
+ */
+const pendingStops = new Map<DockerService, Promise<void>>();
+
 export async function startDockerServices(
   services: DockerService[],
   /**
@@ -501,6 +518,8 @@ export async function startDockerServices(
   }
 
   services.forEach(service => startFailures.delete(service));
+
+  await Promise.all(services.map(service => pendingStops.get(service)));
 
   const needingImage =
     knownNeedingImage ?? (await findServicesNeedingImage(services));
@@ -540,7 +559,27 @@ export async function stopDockerServices(
 
   services.forEach(service => startFailures.delete(service));
 
-  await $$`docker compose stop ${services}`;
+  const stop = $$`docker compose stop ${services}`;
+  // A start waiting on this only needs to know the stop is over, not whether
+  // it worked - that's for the caller that asked for the stop.
+  const settled: Promise<void> = stop.then(
+    () => undefined,
+    () => undefined,
+  );
+
+  services.forEach(service => pendingStops.set(service, settled));
+
+  try {
+    await stop;
+  } finally {
+    services.forEach(service => {
+      // Only this call's own entry: a later stop of the same service may have
+      // replaced it, and that one is still in flight.
+      if (pendingStops.get(service) === settled) {
+        pendingStops.delete(service);
+      }
+    });
+  }
 }
 
 export async function stopAllDockerServices(): Promise<void> {
