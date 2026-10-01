@@ -87,6 +87,10 @@ const MSSQL_CONTAINER_BACKUP_DIR = '/var/opt/mssql/data/backups';
 
 const POSTGRES_BACKUP_DIR = path.join(projectRoot, 'data/backups/postgres');
 
+// The role the Public Data API connects as, and which owns the schema (it
+// runs the EF migrations). Created by data/public-api-db/00-init.sh.
+const PUBLIC_DATA_API_ROLE = 'app_public_data_api';
+
 /** The volume as declared in docker-compose.yml, not its real prefixed name. */
 const AZURITE_DECLARED_VOLUME = 'data-storage-data';
 const AZURITE_BACKUP_DIR = path.join(projectRoot, 'data/backups/azurite');
@@ -429,11 +433,18 @@ async function restorePostgresBackup(id: string): Promise<void> {
   // aren't there yet on a first restore. The exit code alone therefore can't
   // tell a real failure from routine noise, so the stderr is sifted below
   // rather than the whole thing being taken as success.
+  //
+  // `--no-owner` makes whoever performs the restore the owner of everything
+  // it creates, so `--role` switches to the API's role for that. Without it,
+  // the restored schema ends up owned by postgres and the API (which runs the
+  // EF migrations at startup as app_public_data_api - see
+  // data/public-api-db/00-init.sh) can no longer ALTER its own tables, so
+  // the next migration fails with "must be owner of table".
   const child = $$({
     env: { PGPASSWORD: password },
     stdin: 'pipe',
     reject: false,
-  })`docker compose exec -T public-api-db pg_restore -U postgres -d ${database} --clean --if-exists --no-owner` as ExecaChildProcessWithoutNullStreams;
+  })`docker compose exec -T public-api-db pg_restore -U postgres -d ${database} --clean --if-exists --no-owner --role ${PUBLIC_DATA_API_ROLE}` as ExecaChildProcessWithoutNullStreams;
 
   const [, result] = await Promise.all([
     pipeline(fs.createReadStream(backup.files[0]), child.stdin),
