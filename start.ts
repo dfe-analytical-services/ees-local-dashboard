@@ -211,8 +211,14 @@ async function startDockerServices() {
       servicesToStart.includes('admin') ||
       servicesToStart.includes('dataScreener')
     ) {
-      await $$`docker compose down data-screener`;
-      await $$`docker compose rm -f data-screener`;
+      // Stop and remove the existing container so the image rebuilt below is
+      // picked up. Deliberately not `compose down data-screener`: `down` also
+      // tears down the compose network, and when data-screener was the only
+      // container running that happened for real, making the `compose up`
+      // below intermittently fail with "failed to set up container
+      // networking: network ... not found". `rm --stop` leaves the network
+      // alone.
+      await $$`docker compose rm -f -s data-screener`;
 
       cloneRequiredRepository(
         screenerRepositoryName,
