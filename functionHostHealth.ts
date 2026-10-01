@@ -1,4 +1,10 @@
-import { allowedServiceNames, ServiceName, serviceSchemas } from './services';
+import {
+  allowedDockerServices,
+  allowedServiceNames,
+  DockerService,
+  ServiceName,
+  serviceSchemas,
+} from './services';
 import { isOlderVersion } from './utils/versions';
 
 /**
@@ -44,6 +50,12 @@ interface FailurePattern {
    * them off after the wrong thing entirely.
    */
   versionMismatch?: boolean;
+  /**
+   * What to tell the user to do about it, where the line itself says - which
+   * {@link describeRemedy}'s general advice can't, since all it has to go on
+   * is the Core Tools version.
+   */
+  remedy?: (match: RegExpMatchArray, service: ServiceName) => string;
 }
 
 /**
@@ -67,6 +79,30 @@ const FAILURE_PATTERNS: FailurePattern[] = [
     describe: ([, assembly, major]) =>
       `the Functions host can't load '${assembly}' ${major}.x`,
     versionMismatch: true,
+  },
+  {
+    // The host reading its secrets out of blob storage, before it has indexed
+    // anything, and finding nothing listening. `data-storage:10000` is
+    // Azurite, which runs as a Docker service here - so this is a host that
+    // was built and launched while that container was down, or still
+    // stopping. It never retries: the host sits faulted holding its port.
+    pattern: /Azure\.Core: Connection refused \(([^():\s]+):(\d+)\)/,
+    describe: ([, host, port]) =>
+      `nothing was listening at ${host}:${port} when it tried to read its ` +
+      `storage`,
+    // The description has the host and port; the rest of the line repeats
+    // them twice more under different namespaces.
+    quoteLine: false,
+    remedy: ([, host], service) => {
+      const dockerService = findDockerService(host);
+
+      return dockerService
+        ? `Check the '${dockerService}' Docker service is up (it was most ` +
+            `likely down, or still stopping, when ${service} started), then ` +
+            `start ${service} again.`
+        : `Check whatever should be listening there is up, then start ` +
+            `${service} again.`;
+    },
   },
   {
     // Whatever the reason, the app's own startup class threw - so no
@@ -98,6 +134,17 @@ const FAILURE_PATTERNS: FailurePattern[] = [
     quoteLine: false,
   },
 ];
+
+/**
+ * The Docker service a hostname in a connection string refers to, if any.
+ *
+ * docker-compose.yml names the containers, and the /etc/hosts entries the
+ * README asks for point those same names at localhost - so a host that's one
+ * of them is a container, and the advice can name it.
+ */
+function findDockerService(host: string): DockerService | undefined {
+  return allowedDockerServices.find(service => service === host);
+}
 
 /** Long assembly load errors make for an unreadable banner. */
 function truncate(line: string, maxLength = 160): string {
@@ -295,6 +342,7 @@ export default function findFunctionHostFailure(
     describe,
     quoteLine = true,
     versionMismatch = false,
+    remedy,
   } of FAILURE_PATTERNS) {
     // eslint-disable-next-line no-restricted-syntax
     for (const line of lines) {
@@ -305,12 +353,15 @@ export default function findFunctionHostFailure(
         const version = findCoreToolsVersion(lines);
 
         const quoted = quoteLine ? ` ("${truncate(line)}")` : '';
+        const advice = remedy
+          ? remedy(match, service)
+          : describeRemedy(version, versionMismatch);
 
         return {
           cause,
           message:
             `${service}'s Functions host isn't running any functions: ` +
-            `${cause}${quoted}. ${describeRemedy(version, versionMismatch)}`,
+            `${cause}${quoted}. ${advice}`,
         };
       }
     }

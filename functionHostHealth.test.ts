@@ -50,6 +50,25 @@ const healthyLogs = [
 ];
 
 /**
+ * publicProcessor on Core Tools 4.14.0, started a few seconds after a stop-all
+ * that `data-storage` (Azurite) was still in the middle of honouring. Also
+ * copied from data/dashboard-logs. Nothing here is the host's fault, and the
+ * version banner is right there to prove it - but without the connection
+ * line being read, the card said only that startup had errored and to go and
+ * download the log.
+ */
+const storageDownLogs = [
+  'Azure Functions Core Tools',
+  'Core Tools Version:       4.14.0+4a17060ecc915f1672d86717a487ace30f535e74 (64-bit)',
+  'Function Runtime Version: 4.1052.200.26352',
+  '[2026-10-01T09:25:52.323Z] There was an error performing a read operation on the Blob Storage Secret Repository.',
+  '[2026-10-01T09:25:52.323Z] Azure.Core: Connection refused (data-storage:10000). System.Net.Http: Connection refused (data-storage:10000). System.Net.Sockets: Connection refused.',
+  "[2026-10-01T09:25:52.357Z] A host error has occurred during startup operation '1f6b95f3-0bf9-4064-8531-f36667c0f2d2'.",
+  "Value cannot be null. (Parameter 'provider')",
+  'Press any key to continue....',
+];
+
+/**
  * processor, an hour and a half into a run that had started cleanly on Core
  * Tools 4.14.0 and already executed a function. Its language worker then
  * exited, and the host re-launched it - printing, as it does, the same lines
@@ -186,6 +205,38 @@ describe('findFunctionHostFailure', () => {
     assert.doesNotMatch(failure.message, new RegExp(MIN_CORE_TOOLS_VERSION));
   });
 
+  it('names the host nothing was listening at, and the container to check', () => {
+    const failure = findFunctionHostFailure('publicProcessor', storageDownLogs);
+
+    assert.ok(failure);
+    assert.equal(
+      failure.cause,
+      'nothing was listening at data-storage:10000 when it tried to read its storage',
+    );
+    // The host is a Docker service of this repo's, so the advice can say
+    // which card to look at - and that a restart is all the host needs.
+    assert.match(failure.message, /'data-storage' Docker service/);
+    assert.match(failure.message, /start publicProcessor again/);
+    // None of the general advice applies: the log isn't going to say more
+    // than this already has, and Core Tools has nothing to do with it.
+    assert.doesNotMatch(failure.message, /full log/);
+    assert.doesNotMatch(failure.message, /Core Tools/);
+    // And the line isn't quoted - it would only repeat the host and port
+    // twice more.
+    assert.doesNotMatch(failure.message, /System\.Net/);
+  });
+
+  it('wins over the host error that the refused connection goes on to cause', () => {
+    // Both lines are in the log; the one naming the cause has to be the one
+    // reported, wherever it sits.
+    const failure = findFunctionHostFailure('publicProcessor', [
+      ...storageDownLogs.slice(5),
+      ...storageDownLogs.slice(0, 5),
+    ]);
+
+    assert.match(failure?.cause ?? '', /nothing was listening/);
+  });
+
   it('stays quiet about a host that recycled its worker and carried on', () => {
     assert.equal(
       findFunctionHostFailure('processor', recycledWorkerLogs),
@@ -268,6 +319,13 @@ describe('findFunctionHostFailureLine', () => {
     );
 
     assert.equal(failing.length, 4);
+  });
+
+  it('recognises a refused connection on its own', () => {
+    assert.equal(
+      findFunctionHostFailureLine(storageDownLogs[4]),
+      'nothing was listening at data-storage:10000 when it tried to read its storage',
+    );
   });
 
   it('passes over an ordinary startup', () => {
