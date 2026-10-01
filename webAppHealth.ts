@@ -9,8 +9,11 @@ import { projectRoot, ServiceName } from './services';
  * shells out to the admin app's `start` script and proxies to the dev server
  * that comes up (see `spa.UseReactDevelopmentServer` in Startup.cs), so a
  * broken install over there surfaces as an admin failure.
+ *
+ * Exported so everything that reports on these apps (this scan, the probe in
+ * webAppProbe.ts) calls them the same thing.
  */
-const webApps: Partial<Record<ServiceName, string>> = {
+export const webApps: Partial<Record<ServiceName, string>> = {
   admin: "the admin app's dev server",
   frontend: 'the public frontend',
   frontendProd: 'the public frontend',
@@ -98,6 +101,22 @@ const FAILURE_PATTERNS: FailurePattern[] = [
     pattern:
       /The npm script '.*' exited without indicating that the create-react-app server was listening/,
     describe: () => 'its dev server exited instead of starting up',
+  },
+  {
+    // The other symptom, of a dev server that hung rather than exited:
+    // admin's SPA proxy parks every request until the dev server answers, so
+    // when it never does the browser waits, gives up, and Kestrel logs the
+    // cancelled request to the homepage as a 499. Only reported for waits no
+    // one would sit through on a page that was merely slow, because a 499 is
+    // also just someone closing a tab mid-request.
+    pattern:
+      /Request finished HTTP\/\S+ GET \S+?:\d+\/ - 499 .*?(\d+(?:\.\d+)?)ms/,
+    describe: ([, ms]) =>
+      Number(ms) >= 60_000
+        ? 'requests to its homepage hang until the browser gives up waiting'
+        : undefined,
+    // The line is a status code and a duration the cause already paraphrases.
+    quoteLine: false,
   },
 ];
 

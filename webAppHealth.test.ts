@@ -109,6 +109,40 @@ describe('findWebAppFailure', () => {
     assert.ok(findWebAppFailure('frontendProd', frontendLogs));
   });
 
+  it('reads a homepage request the browser gave up on as a hang', () => {
+    // Kestrel logging a 499 on '/' after two hours is what an admin whose dev
+    // server crashed without a recognisable cause looks like: the SPA proxy
+    // parks the request forever, and this line is all the log ever says.
+    const failure = findWebAppFailure('admin', [
+      'info: Microsoft.AspNetCore.Hosting.Diagnostics[2]',
+      '      Request finished HTTP/2 GET https://localhost:5021/ - 499 - - 7326494.6958ms',
+    ]);
+
+    assert.ok(failure);
+    assert.match(failure.cause, /hang until the browser gives up/);
+  });
+
+  it('leaves a quickly-cancelled request alone', () => {
+    // A 499 is also just someone closing a tab or refreshing mid-load, so a
+    // short one says nothing about the dev server.
+    assert.equal(
+      findWebAppFailure('admin', [
+        '      Request finished HTTP/2 GET https://localhost:5021/ - 499 - - 2142.5142ms',
+      ]),
+      undefined,
+    );
+  });
+
+  it('prefers a named cause over the hang it produces', () => {
+    const failure = findWebAppFailure('admin', [
+      '      Request finished HTTP/2 GET https://localhost:5021/ - 499 - - 7326494.6958ms',
+      "      Cannot find module 'swc-loader'",
+    ]);
+
+    assert.ok(failure);
+    assert.match(failure.cause, /'swc-loader' package isn't installed/);
+  });
+
   it('ignores services with no JavaScript app of their own', () => {
     // The .NET APIs and Function hosts have nothing that a reinstall would
     // fix, and 'Cannot find module' in their output means something else.
