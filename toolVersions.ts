@@ -79,8 +79,10 @@ export function describeNodeIssue(
     severity: 'warning',
     message:
       `Node ${installed} is running the dashboard (and the services it ` +
-      `starts), but .nvmrc pins ${pinned} - run 'nvm install' in the project ` +
-      `root and restart the dashboard on the new version.`,
+      `starts), but .nvmrc pins ${pinned} - run 'nvm install ${pinned}', ` +
+      `'nvm use ${pinned}' and 'nvm alias default ${pinned}' (so new shells ` +
+      `get it too), then 'corepack enable' (a newly installed Node has no ` +
+      `pnpm until you do), and restart the dashboard on the new version.`,
   };
 }
 

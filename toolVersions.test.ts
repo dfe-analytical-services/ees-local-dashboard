@@ -133,6 +133,16 @@ describe('describeNodeIssue', () => {
     assert.match(issue.message, /restart the dashboard/);
   });
 
+  it('gives every command needed to switch to the pinned version', () => {
+    const issue = describeNodeIssue('22.22.0', '22.23.1');
+
+    assert.ok(issue);
+    assert.match(issue.message, /nvm install 22\.23\.1/);
+    assert.match(issue.message, /nvm use 22\.23\.1/);
+    assert.match(issue.message, /nvm alias default 22\.23\.1/);
+    assert.match(issue.message, /corepack enable/);
+  });
+
   it('says nothing when the pin is satisfied', () => {
     assert.equal(describeNodeIssue('22.23.1', '22.23.1'), undefined);
   });
