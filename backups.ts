@@ -206,7 +206,19 @@ async function execSqlcmd(query: string): Promise<void> {
   // -b: exit with a non-zero code on SQL errors, so failures (e.g. permission
   // errors writing the backup file) surface as thrown errors instead of
   // being silently swallowed by sqlcmd's default success exit code.
-  await $$`docker compose exec -T db /opt/mssql-tools18/bin/sqlcmd -C -b -S localhost -U sa -P ${password} -Q ${query}`;
+  const { exitCode, stdout, stderr } = await $$({
+    reject: false,
+  })`docker compose exec -T db /opt/mssql-tools18/bin/sqlcmd -C -b -S localhost -U sa -P ${password} -Q ${query}`;
+
+  // Thrown by hand rather than left to execa, whose message leads with the
+  // whole command line - query, sa password and all - which pushes SQL
+  // Server's own errors (printed to stdout) out of sight in the dashboard's
+  // alert.
+  if (exitCode !== 0) {
+    throw new Error(
+      `sqlcmd exited with code ${exitCode}: ${`${stderr}\n${stdout}`.trim()}`,
+    );
+  }
 }
 
 async function listSingleFileBackups(
