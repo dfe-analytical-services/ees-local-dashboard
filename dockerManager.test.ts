@@ -14,10 +14,11 @@ import { describeExitedContainer, readableLogLines } from './dockerManager';
  * assert the command strings back at themselves.
  */
 
-// Verbatim from `docker logs ees-idp` after a boot was interrupted part-way
-// through, leaving an admin user in keycloak-add-user.json that the server
-// never got to consume. Every later start dies on this one line, before
-// Keycloak itself is invoked - so it's the only thing there is to report.
+// Verbatim from `docker logs ees-idp` when restarting a container from the
+// pre-Quarkus (JBoss) Keycloak image, whose entrypoint adds the admin user to
+// keycloak-add-user.json again on every start. Every start after the first
+// dies on this one line, before Keycloak itself is invoked - so it's the only
+// thing there is to report.
 const idpLogs =
   "\u001B[0mUser with username 'admin' already added to '/opt/jboss/keycloak/standalone/configuration/keycloak-add-user.json'\n";
 

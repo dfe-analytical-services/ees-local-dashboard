@@ -1,4 +1,6 @@
-import { ExecaChildProcess } from 'execa';
+import { $, ExecaChildProcess } from 'execa';
+import fsp from 'node:fs/promises';
+import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import splitLines from 'split2';
 import {
@@ -371,16 +373,65 @@ export function getDockerImagePreparation(
 }
 
 /**
+ * When this process last built each service's image. A build Docker answers
+ * entirely from cache hands back the existing image, Created date and all, so
+ * without this a context file that was touched but not changed (a branch
+ * switched away and back) would look newer than the image on every start, and
+ * rebuild it every time.
+ */
+const lastBuiltAt = new Map<DockerService, number>();
+
+/**
+ * The most recent modification time of any git-tracked file under a build
+ * context, or undefined if it isn't in a git checkout. Tracked files only, so
+ * that build output or editor droppings in the directory don't count as a
+ * change - and git rewrites a file on checkout or pull, so a changed
+ * Dockerfile always comes out newer than the image built before it.
+ */
+async function newestTrackedFileTime(dir: string): Promise<number | undefined> {
+  const { stdout, exitCode } = await $({
+    cwd: dir,
+    reject: false,
+  })`git ls-files -z`;
+
+  if (exitCode !== 0) {
+    return undefined;
+  }
+
+  const stats = await Promise.all(
+    stdout
+      .split('\0')
+      .filter(Boolean)
+      // A tracked file deleted from the working tree has nothing to stat.
+      .map(file => fsp.stat(path.join(dir, file)).catch(() => undefined)),
+  );
+
+  return Math.max(0, ...stats.map(stat => stat?.mtimeMs ?? 0));
+}
+
+/**
  * Which of these services can't start until their image has been fetched:
- * those whose image doesn't exist locally yet, mapped to whether getting it
- * means a build or a pull. `compose up` would build/pull them itself, but
+ * those whose image doesn't exist locally yet, or (for built ones) was built
+ * before its build context last changed, mapped to whether getting it means a
+ * build or a pull. `compose up` would build/pull a missing one itself, but
  * inline - holding whatever asked for the start hostage for however many
  * minutes that takes, with nothing anywhere saying why.
+ *
+ * A stale built image it wouldn't rebuild at all: `up` happily starts the
+ * image it has, so a Dockerfile change pulled into the checkout (Keycloak
+ * moving from the old JBoss distribution to Quarkus, say) never reaches the
+ * container, which goes on failing in whatever way the old image did. A
+ * running service is left alone, though - rebuilding it would mean `up`
+ * recreating it out from under whatever's using it, just because something
+ * that depends on it was started.
  */
 export async function findServicesNeedingImage(
   services: DockerService[],
 ): Promise<Map<DockerService, DockerImagePreparation>> {
-  const config = await getComposeConfig();
+  const [config, entries] = await Promise.all([
+    getComposeConfig(),
+    getComposePsEntries(),
+  ]);
 
   const checks = await Promise.all(
     services.map(
@@ -397,15 +448,29 @@ export async function findServicesNeedingImage(
         // service sets `image:` explicitly.
         const image = schema.image ?? `${config.name}-${service}`;
 
-        const { exitCode } = await $$({
+        const { exitCode, stdout } = await $$({
           reject: false,
-        })`docker image inspect ${image}`;
+        })`docker image inspect --format {{.Created}} ${image}`;
 
-        if (exitCode === 0) {
+        if (exitCode !== 0) {
+          return [service, schema.build ? 'building' : 'pulling'];
+        }
+
+        const context = schema.build?.context;
+
+        if (!context || entries.get(service)?.State === 'running') {
           return undefined;
         }
 
-        return [service, schema.build ? 'building' : 'pulling'];
+        const contextChangedAt = await newestTrackedFileTime(context);
+        const builtAt = Math.max(
+          Date.parse(stdout.trim()),
+          lastBuiltAt.get(service) ?? 0,
+        );
+
+        return contextChangedAt !== undefined && contextChangedAt > builtAt
+          ? [service, 'building']
+          : undefined;
       },
     ),
   );
@@ -414,7 +479,8 @@ export async function findServicesNeedingImage(
 }
 
 /**
- * Builds the images for services that have never been built, with whatever
+ * Builds the images for services that have never been built (or have changed
+ * since they were), with whatever
  * each one needs to exist first. The screener builds from a sibling
  * `ees-screener-api` checkout (cloned here if it's missing) and pins its R
  * packages to a CRAN snapshot with pre-compiled binaries, mirroring what the
@@ -433,7 +499,11 @@ async function buildDockerImages(services: DockerService[]): Promise<void> {
     );
   }
 
+  const startedAt = Date.now();
+
   await $$`docker compose build ${buildArgs} ${services}`;
+
+  services.forEach(service => lastBuiltAt.set(service, startedAt));
 }
 
 /**
