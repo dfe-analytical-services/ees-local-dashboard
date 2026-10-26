@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import { projectRoot } from './services';
 import errorMessage from './errorMessage';
 import $$ from './projectExec';
@@ -85,6 +86,11 @@ const MSSQL_DATABASES = ['content', 'statistics'] as const;
 const MSSQL_HOST_BACKUP_DIR = path.join(projectRoot, 'data/ees-mssql/backups');
 const MSSQL_CONTAINER_BACKUP_DIR = '/var/opt/mssql/data/backups';
 
+// Generous because recovery time grows with the databases and with whatever
+// was left uncommitted in them when the container last stopped.
+const MSSQL_READY_TIMEOUT_MS = 180_000;
+const MSSQL_READY_POLL_MS = 1_000;
+
 const POSTGRES_BACKUP_DIR = path.join(projectRoot, 'data/backups/postgres');
 
 // The role the Public Data API connects as, and which owns the schema (it
@@ -136,9 +142,65 @@ async function sumFileSizes(files: string[]): Promise<number> {
   return stats.reduce((total, stat) => total + stat.size, 0);
 }
 
-async function execSqlcmd(query: string): Promise<void> {
+/**
+ * Starts the db container if it isn't up, then waits for SQL Server inside it
+ * to be usable. `docker compose up` returns as soon as the container is
+ * running, but SQL Server takes a while longer to accept logins and then to
+ * recover each database - and a BACKUP sent during that window fails with
+ * "Database N cannot be autostarted during server shutdown or startup".
+ *
+ * Only RECOVERING is waited out: a database that's missing (a restore onto a
+ * fresh data directory) or stuck in some other state won't change by waiting,
+ * and the command that follows reports it in SQL Server's own words.
+ */
+async function ensureMssqlReady(): Promise<void> {
   await startDockerServices(['db']);
 
+  const password = await getComposeServiceEnv('db', 'SA_PASSWORD');
+  const databaseList = MSSQL_DATABASES.map(db => `N'${db}'`).join(', ');
+  const query = `SET NOCOUNT ON; SELECT name, state_desc FROM sys.databases WHERE name IN (${databaseList})`;
+  const deadline = Date.now() + MSSQL_READY_TIMEOUT_MS;
+
+  for (;;) {
+    // -l: a short login timeout, so each attempt while SQL Server is still
+    // booting fails fast rather than hanging for sqlcmd's default 8 seconds.
+    // -h -1 -W -s: headerless, trimmed, pipe-separated rows to parse below.
+    // eslint-disable-next-line no-await-in-loop
+    const { exitCode, stdout, stderr } = await $$({
+      reject: false,
+    })`docker compose exec -T db /opt/mssql-tools18/bin/sqlcmd -C -b -l 5 -h -1 -W -s ${'|'} -S localhost -U sa -P ${password} -Q ${query}`;
+
+    let notReady: string;
+
+    if (exitCode !== 0) {
+      notReady = `still not accepting connections (${`${stderr}\n${stdout}`.trim()})`;
+    } else {
+      const recovering = stdout
+        .split('\n')
+        .map(line => line.trim().split('|'))
+        .filter(([, state]) => state === 'RECOVERING')
+        .map(([name]) => name);
+
+      if (recovering.length === 0) {
+        return;
+      }
+
+      notReady = `still recovering ${recovering.join(' and ')}`;
+    }
+
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `SQL Server in the Db container is ${notReady} after ${MSSQL_READY_TIMEOUT_MS / 1000} seconds - check the Db logs, then try again.`,
+      );
+    }
+
+    // eslint-disable-next-line no-await-in-loop
+    await delay(MSSQL_READY_POLL_MS);
+  }
+}
+
+/** Runs a query against the db container, which must already be ready. */
+async function execSqlcmd(query: string): Promise<void> {
   const password = await getComposeServiceEnv('db', 'SA_PASSWORD');
 
   // -b: exit with a non-zero code on SQL errors, so failures (e.g. permission
@@ -249,6 +311,7 @@ async function ensureMssqlBackupDir(): Promise<void> {
 
 async function createMssqlBackup(id: string): Promise<BackupInfo> {
   await ensureMssqlBackupDir();
+  await ensureMssqlReady();
   const { label, timestamp } = parseId(id);
 
   const files = await Promise.all(
@@ -388,6 +451,8 @@ async function restoreMssqlBackup(id: string): Promise<void> {
   if (!backup) {
     throw new Error(`MSSQL backup '${id}' not found`);
   }
+
+  await ensureMssqlReady();
 
   await Promise.all(
     backup.files.map(file => {
