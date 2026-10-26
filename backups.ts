@@ -435,6 +435,20 @@ export async function createUnifiedBackup(
     });
 
     return { id, label: parsedLabel, timestamp, stores };
+  } catch (err) {
+    // The stores that did succeed (and, for MSSQL, whichever database got
+    // backed up before the other failed) have still written their files, and
+    // left behind they'd be listed as a backup that restores to a mix of this
+    // snapshot and whatever the failed store happens to hold at the time.
+    try {
+      await deleteBackupFiles(id);
+    } catch (cleanupErr) {
+      throw new Error(
+        `${errorMessage(err)} (the partial backup '${id}' also couldn't be removed: ${errorMessage(cleanupErr)})`,
+      );
+    }
+
+    throw err;
   } finally {
     await Promise.all(
       stoppedServices.map(service =>
@@ -666,10 +680,13 @@ export async function deleteUnifiedBackup(id: string): Promise<void> {
     throw new Error(`Backup '${id}' not found`);
   }
 
-  const presentStores = BACKUP_STORES.filter(store => backup.stores[store]);
+  await deleteBackupFiles(id);
+}
 
+/** Deletes whatever files exist for a backup id, across every store. */
+async function deleteBackupFiles(id: string): Promise<void> {
   const backupsByStore = await Promise.all(
-    presentStores.map(store => listBackupsByStore(store)),
+    BACKUP_STORES.map(store => listBackupsByStore(store)),
   );
 
   const files = backupsByStore
